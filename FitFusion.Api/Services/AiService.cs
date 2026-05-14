@@ -616,4 +616,118 @@ public sealed class AiService
     private sealed record GeminiSelection(List<GeminiSelectionDay>? Days);
     private sealed record GeminiSelectionDay(string DayName, List<GeminiSelectionMeal>? Meals);
     private sealed record GeminiSelectionMeal(string SlotName, List<string>? DishIds);
+
+    // ------------------------------------------------------------------
+    // 5. Workout calorie estimator (AI-assisted MET classifier)
+    // ------------------------------------------------------------------
+    public async Task<WorkoutEstimateResponse> EstimateWorkoutAsync(
+        WorkoutEstimateRequest req,
+        string uid,
+        CancellationToken ct)
+    {
+        if (req.DurationMin <= 0)
+            throw new InvalidOperationException("durationMin debe ser mayor que 0.");
+        if (req.Exercises is null || req.Exercises.Count == 0)
+            throw new InvalidOperationException("Debes incluir al menos un ejercicio.");
+
+        float weight;
+        if (req.WeightKgOverride is { } w && w > 0)
+        {
+            weight = w;
+        }
+        else
+        {
+            var profile = await _db.UserProfiles.FirstOrDefaultAsync(p => p.Uid == uid, ct);
+            if (profile?.WeightKg is null || profile.WeightKg <= 0)
+                throw new InvalidOperationException(
+                    "Falta peso en el perfil; pásalo en weightKgOverride o completa el perfil.");
+            weight = profile.WeightKg.Value;
+        }
+
+        var sb = new StringBuilder();
+        sb.AppendLine("Eres un fisiólogo del ejercicio. Clasifica este entrenamiento.");
+        sb.AppendLine($"Duración total: {req.DurationMin} min.");
+        sb.AppendLine("Ejercicios:");
+        foreach (var ex in req.Exercises)
+        {
+            sb.Append("- ").Append(ex.Name);
+            if (ex.Sets is { } s && ex.Reps is { } r) sb.Append($" ({s}x{r}");
+            else if (ex.Sets is { } s2)               sb.Append($" ({s2} series");
+            else if (ex.Reps is { } r2)               sb.Append($" ({r2} reps");
+            if (ex.WeightKg is { } kg && kg > 0)      sb.Append($" @ {kg} kg");
+            if (ex.Sets is not null || ex.Reps is not null || (ex.WeightKg is { } kg2 && kg2 > 0))
+                sb.Append(')');
+            sb.AppendLine();
+        }
+        sb.AppendLine();
+        sb.AppendLine("Devuelve:");
+        sb.AppendLine("- category: \"strength\", \"cardio\", \"mixed\", \"mobility\" o \"unknown\"");
+        sb.AppendLine("- intensity: \"low\", \"moderate\", \"moderate_high\" o \"high\"");
+        sb.AppendLine("- estimatedMet: número entre 2.0 y 12.0 (MET medio de la sesión).");
+        sb.AppendLine("- confidence: entre 0 y 1.");
+        sb.AppendLine("- reason: justificación breve <=120 caracteres.");
+
+        const string schema = """
+        {
+          "type": "object",
+          "properties": {
+            "category":     { "type": "string" },
+            "intensity":    { "type": "string" },
+            "estimatedMet": { "type": "number" },
+            "confidence":   { "type": "number" },
+            "reason":       { "type": "string" }
+          },
+          "required": ["category","intensity","estimatedMet","confidence"]
+        }
+        """;
+
+        GeminiWorkoutClassification? classification = null;
+        try
+        {
+            classification = await _gemini.GenerateAsync<GeminiWorkoutClassification>(sb.ToString(), schema, ct);
+        }
+        catch (GeminiException e)
+        {
+            _log.LogWarning(e, "Gemini workout-estimate falló; usando fallback heurístico.");
+        }
+
+        if (classification is null || classification.EstimatedMet is < 1.5f or > 14f)
+        {
+            classification = HeuristicClassify(req);
+        }
+
+        var met  = Math.Clamp(classification.EstimatedMet, 2f, 12f);
+        var kcal = (int)Math.Round(met * 3.5f * weight / 200f * req.DurationMin);
+        return new WorkoutEstimateResponse(
+            Category:     classification.Category,
+            Intensity:    classification.Intensity,
+            EstimatedMet: met,
+            Kcal:         kcal,
+            WeightKgUsed: weight,
+            Confidence:   Math.Clamp(classification.Confidence, 0f, 1f),
+            Explanation:  classification.Reason);
+    }
+
+    private static GeminiWorkoutClassification HeuristicClassify(WorkoutEstimateRequest req)
+    {
+        var names = req.Exercises.Select(e => e.Name.ToLowerInvariant()).ToList();
+        var isCardio = names.Any(n =>
+            n.Contains("corr") || n.Contains("run") || n.Contains("bici") || n.Contains("cycl") ||
+            n.Contains("nad")  || n.Contains("swim") || n.Contains("hiit") || n.Contains("interval") ||
+            n.Contains("eliptic") || n.Contains("remo") || n.Contains("row"));
+        var isStrength = names.Any(n =>
+            n.Contains("pesa") || n.Contains("sentadilla") || n.Contains("press") || n.Contains("peso muerto") ||
+            n.Contains("dominada") || n.Contains("curl") || n.Contains("squat") || n.Contains("deadlift") ||
+            n.Contains("bench"));
+
+        var (category, intensity, met) = (isCardio, isStrength) switch
+        {
+            (true, true)   => ("mixed",    "moderate",      5.5f),
+            (true, false)  => req.DurationMin >= 30 ? ("cardio",   "moderate_high", 7.0f) : ("cardio",   "moderate", 5.0f),
+            (false, true)  => req.DurationMin >= 45 ? ("strength", "moderate_high", 6.0f) : ("strength", "moderate", 4.5f),
+            _              => ("unknown",  "moderate",      4.0f),
+        };
+
+        return new GeminiWorkoutClassification(category, intensity, met, 0.4f, "Estimado sin IA (heurística local).");
+    }
 }

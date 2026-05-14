@@ -1,3 +1,4 @@
+using FitFusion.Api.Auth;
 using FitFusion.Api.Models.Ai;
 using FitFusion.Api.Services;
 using Microsoft.AspNetCore.Authorization;
@@ -34,6 +35,10 @@ public class AiController : ControllerBase
     [HttpPost("meal-plan/generate")]
     public Task<IActionResult> GenerateMealPlan(MealPlanRequest req, CancellationToken ct) =>
         Run(() => _ai.GenerateMealPlanAsync(req, ct));
+
+    [HttpPost("workout/estimate")]
+    public Task<IActionResult> EstimateWorkout(WorkoutEstimateRequest req, CancellationToken ct) =>
+        Run(() => _ai.EstimateWorkoutAsync(req, User.RequireUid(), ct));
 
     private async Task<IActionResult> Run<T>(Func<Task<T>> action)
     {
