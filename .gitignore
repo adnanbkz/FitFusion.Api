@@ -112,6 +112,15 @@ ipch/
 *.VC.db
 *.VC.VC.opendb
 
+# FitFusion local SQLite database
+fitfusion.db
+fitfusion.db-journal
+fitfusion.db-shm
+fitfusion.db-wal
+
+# Codex plans (entregables al CLI, no se commitean)
+plan-*.md
+
 # Visual Studio profiler
 *.psess
 *.vsp
