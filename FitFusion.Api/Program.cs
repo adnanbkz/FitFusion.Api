@@ -61,6 +61,7 @@ builder.Services.AddDbContext<FitFusionDbContext>(opts =>
 builder.Services.AddHttpClient<IGeminiClient, GeminiClient>();
 builder.Services.AddScoped<AiService>();
 builder.Services.AddSingleton<MetCalculator>();
+builder.Services.AddSingleton<CalorieCalculator>();
 
 // -----------------------------------------------------------------------------
 // Auth: Firebase ID Token.
